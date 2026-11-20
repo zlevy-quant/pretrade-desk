@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pre-Trade Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="topbar">
+  <div class="wrap">
+    <div class="brand"><span class="dot" id="statusDot"></span> Pre-Trade Desk</div>
+    <span class="pill" id="tenantPill" hidden>Tenant: <strong id="tenantName">RIA</strong></span>
+    <span class="pill" id="userPill" hidden></span>
+    <span class="spacer"></span>
+    <button class="tbtn" id="killBtn" hidden>Kill switch: off</button>
+    <button class="tbtn" id="themeBtn">Theme</button>
+    <button class="tbtn" id="logoutBtn" hidden>Sign out</button>
+  </div>
+</div>
+<div class="kill-banner" id="killBanner" hidden>Master kill switch engaged for this tenant. All new orders are blocked before routing.</div>
+
+<!-- LOGIN -->
+<section class="login wrap" id="loginView">
+  <div class="card">
+    <h2>Sign in</h2>
+    <p class="sub">Order management desk, pre-trade risk gateway.</p>
+    <div class="field"><label for="user">Trader</label><input id="user" value="j.rivera" autocomplete="username"></div>
+    <div class="field"><label for="pass">Password</label><input id="pass" type="password" value="demo" autocomplete="current-password"></div>
+    <div class="field"><label for="role">Role</label>
+      <select id="role">
+        <option value="advisor">Advisor (enters orders)</option>
+        <option value="supervisor">Trade-desk supervisor (Series 24, may override)</option>
+      </select>
+    </div>
+    <div class="field"><label for="tenant">Tenant</label>
+      <select id="tenant"><option value="RIA">RIA</option><option value="BD">Broker-dealer</option></select>
+    </div>
+    <button class="primary" id="loginBtn">Sign in to the desk</button>
+    <p class="hint">Demo login, any password works. The server issues a session token. Sign in as <code>advisor</code> to see a soft block, then as <code>supervisor</code> to override it. All state is stored server-side in the database.</p>
+    <p class="hint" id="loginErr" style="color:var(--bad)" hidden></p>
+  </div>
+</section>
+
+<!-- DESK -->
+<main class="wrap" id="deskView" hidden>
+  <div class="grid">
+    <div class="stack">
+      <div class="panel">
+        <h3>New order</h3>
+        <div class="body stack">
+          <div class="scenarios" id="scenarios">
+            <button class="chipbtn" data-sc="clean">Clean buy</button>
+            <button class="chipbtn" data-sc="collar">Through-collar limit</button>
+            <button class="chipbtn" data-sc="dupe">Duplicate x3</button>
+            <button class="chipbtn" data-sc="stale">Stale market data</button>
+            <button class="chipbtn" data-sc="bp">Over buying power</button>
+          </div>
+          <div class="row2">
+            <div class="field"><label for="account">Account</label><input id="account" value="ACME-0042"></div>
+            <div class="field"><label for="symbol">Symbol</label><select id="symbol"></select></div>
+          </div>
+          <div class="row3">
+            <div class="field"><label for="side">Side</label>
+              <select id="side"><option>buy</option><option>sell</option><option>sell_short</option><option>buy_to_cover</option></select>
+            </div>
+            <div class="field"><label for="otype">Order type</label>
+              <select id="otype"><option value="market">market</option><option value="limit">limit</option><option value="stop">stop</option><option value="stop_limit">stop_limit</option></select>
+            </div>
+            <div class="field"><label for="qty">Quantity</label><input id="qty" class="mono" value="100" inputmode="numeric"></div>
+          </div>
+          <div class="field"><label for="limit">Limit price</label><input id="limit" class="mono" value="" placeholder="required for limit / stop_limit"></div>
+          <button class="primary" id="submitBtn">Run pre-trade check &amp; place order</button>
+          <p class="note">The order is POSTed to the server, which runs the control engine against live database state and persists the order, its verdict, and an audit row. Nothing is decided in the browser.</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Market data <span style="text-transform:none;font-weight:400;color:var(--muted)">(from the database)</span></h3>
+        <div class="body">
+          <div id="quotes"></div>
+          <label style="margin-top:.8rem"><input type="checkbox" id="staleToggle" style="width:auto;margin-right:.4rem">Force the selected symbol's feed stale (server-side, fail-closed)</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="panel">
+        <h3>Pre-trade verdict</h3>
+        <div class="body" id="verdictBody">
+          <div class="verdict-head idle"><span class="big">No order submitted</span></div>
+          <p class="note">Submit an order to see each control's disposition returned by the server. Hard controls are final; the soft control (price collar) is overridable by a supervisor; buying power and credit limit are audit-only.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>Blotter <span style="text-transform:none;font-weight:400;color:var(--muted)">(persisted)</span></h3>
+        <div class="body">
+          <table class="blotter" id="blotter" hidden><thead><tr><th>Order</th><th>Instrument</th><th>Qty</th><th>Status</th></tr></thead><tbody></tbody></table>
+          <p class="empty" id="blotterEmpty">No orders yet.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>Approval audit trail <span style="text-transform:none;font-weight:400;color:var(--muted)">(write-once)</span></h3>
+        <div class="body"><div id="audit"></div><p class="empty" id="auditEmpty">No decisions recorded yet.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="footer-note">
+    A sanitized, self-contained reimplementation of a pre-trade risk and order-management control layer: a real backend service, a real database, a server-side verdict engine, a supervisory override, a master kill switch, and a write-once audit trail.<br>
+    No employer code, data, or secrets are used. Market data, accounts, and verdicts are simulated. Orders and audit rows persist across restarts.
+  </p>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
