@@ -1,0 +1,3 @@
+# The browser client under public/ is an optional demo UI, not the substance
+# of the project. Exclude it from language stats so they reflect the engine.
+public/** linguist-vendored
