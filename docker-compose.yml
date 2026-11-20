@@ -1,0 +1,14 @@
+# One command to stand the whole thing up:  docker compose up --build
+# Then open http://localhost:8080
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DATA_DIR=/app/data
+    volumes:
+      # Persist the SQLite database on the host so data survives restarts.
+      - ./data:/app/data
+    restart: unless-stopped
