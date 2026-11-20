@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pretrade-desk"
+version = "1.0.0"
+description = "A dependency-free pre-trade risk control engine: a fail-closed order-decision boundary with per-control units, an append-only audit trail, tests, and a latency benchmark."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Zahava Levy" }]
+keywords = ["trading", "pre-trade", "risk", "order-management", "market-data"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["mypy", "ruff"]
+
+[tool.setuptools]
+packages = ["pretrade"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+
+[tool.ruff]
+line-length = 110

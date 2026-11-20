@@ -1,4 +1,9 @@
-node_modules/
+__pycache__/
+*.pyc
+*.pyo
 data/
 *.log
 .DS_Store
+.venv/
+.mypy_cache/
+.ruff_cache/
