@@ -154,6 +154,30 @@ class Handler(BaseHTTPRequestHandler):
             audit.record_event(actor, "MARKETDATA_" + action.upper(), f"{action} feed on {symbol}")
             return self._json(200, {"ok": True})
 
+        if method == "GET" and path == "/api/accounts":
+            cfg = store.get_config()
+            now = utcnow()
+            from .store import _parse  # local import to avoid widening the public API
+            accounts = store.list_accounts()
+            for a in accounts:
+                if a.get("as_of"):
+                    age = int((now - _parse(a["as_of"])).total_seconds())
+                    a["age_sec"], a["stale"] = age, age > cfg.account_max_age_sec
+                else:
+                    a["age_sec"], a["stale"] = None, True
+            return self._json(200, {"accounts": accounts,
+                                    "config": {"account_max_age_sec": cfg.account_max_age_sec}})
+
+        if method == "POST" and path.startswith("/api/accounts/") and path.endswith(("/stale", "/fresh")):
+            parts = path.split("/")
+            account_id, action = parts[3], parts[4]
+            from datetime import timedelta
+            new_as_of = utcnow() - (timedelta(hours=16) if action == "stale" else timedelta(0))
+            if store.set_account_as_of(account_id, new_as_of) == 0:
+                return self._json(404, {"error": "unknown account"})
+            audit.record_event(actor, "ACCOUNTVIEW_" + action.upper(), f"{action} account view on {account_id}")
+            return self._json(200, {"ok": True})
+
         if path == "/api/killswitch":
             if method == "GET":
                 return self._json(200, {"tenant": tenant, "engaged": store.kill_engaged(tenant)})

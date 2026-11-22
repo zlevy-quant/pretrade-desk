@@ -39,7 +39,7 @@
       $("userPill").hidden = false; $("tenantPill").hidden = false; $("killBtn").hidden = false; $("logoutBtn").hidden = false;
       $("userPill").innerHTML = user + " &middot; <strong>" + (role === "supervisor" ? "Supervisor" : "Advisor") + "</strong>";
       $("tenantName").textContent = tenant;
-      return Promise.all([loadMarket(), loadKill(), loadBlotter(), loadAudit()]);
+      return Promise.all([loadMarket(), loadAccounts(), loadKill(), loadBlotter(), loadAudit()]);
     }).catch(function (e) { $("loginErr").textContent = e.message; $("loginErr").hidden = false; });
   });
   $("logoutBtn").addEventListener("click", function () { location.reload(); });
@@ -70,6 +70,37 @@
   });
   $("symbol").addEventListener("change", loadMarket);
 
+  // ---- accounts (real-time position view) ----
+  function restrictionChip(r) {
+    var map = { none: "unrestricted", closing_only: "closing-only", restricted: "RESTRICTED", unknown: "unknown" };
+    var cls = r === "none" ? "ok" : (r === "closing_only" ? "warn" : "bad");
+    return '<span class="r-chip ' + cls + '">' + (map[r] || r) + '</span>';
+  }
+  function loadAccounts() {
+    return api("GET", "/accounts").then(function (res) {
+      var sel = $("account"), cur = sel.value;
+      sel.innerHTML = res.accounts.map(function (a) {
+        return '<option value="' + a.account_id + '">' + a.account_id + " (" + a.tenant + ", " + a.restriction.replace(/_/g, "-") + ")</option>";
+      }).join("");
+      if (cur && res.accounts.some(function (a) { return a.account_id === cur; })) sel.value = cur;
+      $("accounts").innerHTML = res.accounts.map(function (a) {
+        var ageTxt = (a.age_sec == null) ? "no as-of" : (a.stale ? ("stale, " + a.age_sec + "s old") : ("fresh, " + a.age_sec + "s"));
+        var ageCls = (a.stale || a.age_sec == null) ? "q-age stale" : "q-age";
+        return '<div class="quote acct"><span class="sym">' + a.account_id + " <em>" + a.tenant + "</em></span>" +
+          '<span class="q-nums">' + restrictionChip(a.restriction) +
+          ' <span class="' + ageCls + '">' + ageTxt + "</span></span></div>";
+      }).join("");
+      var selected = res.accounts.filter(function (a) { return a.account_id === sel.value; })[0];
+      $("acctStaleToggle").checked = !!(selected && (selected.stale || selected.age_sec == null));
+    });
+  }
+  $("acctStaleToggle").addEventListener("change", function () {
+    var id = $("account").value;
+    var path = "/accounts/" + encodeURIComponent(id) + ($("acctStaleToggle").checked ? "/stale" : "/fresh");
+    api("POST", path, {}).then(loadAccounts).then(loadAudit);
+  });
+  $("account").addEventListener("change", loadAccounts);
+
   // ---- kill switch ----
   function renderKill(engaged) {
     $("killBtn").textContent = "Kill switch: " + (engaged ? "ON" : "off");
@@ -95,7 +126,7 @@
     };
     api("POST", "/orders", order).then(function (res) {
       renderVerdict(res);
-      return Promise.all([loadBlotter(), loadAudit(), loadMarket()]);
+      return Promise.all([loadBlotter(), loadAudit(), loadMarket(), loadAccounts()]);
     }).catch(function (e) { alert(e.message); });
   });
 
@@ -112,9 +143,20 @@
     var text = res.decision === "ALLOW" ? "ORDER ACCEPTED, routed to venue"
       : (res.overridable ? "BLOCKED, overridable (soft control)" : "BLOCKED, final");
     html += '<div class="verdict-head ' + cls + '"><span class="big">' + (res.decision === "ALLOW" ? "✓ " : "✗ ") + text + '</span></div>';
+    // The control that drove the decision: on a block, the first blocking control at the
+    // decisive severity (hard if final, soft if overridable). This is the composition rule.
+    var driverKind = res.decision === "BLOCK" ? (res.overridable ? "soft" : "hard") : null;
+    var driverIdx = -1;
+    if (driverKind) {
+      res.controls.forEach(function (c, i) {
+        if (driverIdx === -1 && c.status === "block" && c.kind === driverKind) driverIdx = i;
+      });
+    }
     html += '<div class="controls-list">';
-    res.controls.forEach(function (c) {
-      html += '<div class="ctrl"><div class="nm">' + c.name.replace(/_/g, " ") + '<span class="tag">' + c.kind + '</span></div>' +
+    res.controls.forEach(function (c, i) {
+      var isDriver = i === driverIdx;
+      html += '<div class="ctrl' + (isDriver ? " driver" : "") + '"><div class="nm">' + c.name.replace(/_/g, " ") +
+        '<span class="tag">' + c.kind + '</span>' + (isDriver ? '<span class="drives">drove verdict</span>' : "") + '</div>' +
         '<div class="rs">' + c.reason + '</div>' + badge(c.status) + '</div>';
     });
     html += '</div>';
@@ -176,16 +218,25 @@
 
   // ---- scenarios ----
   var SC = {
-    clean: function () { set("AAPL", "buy", "market", "100", ""); unstale(); },
-    collar: function () { set("AAPL", "buy", "limit", "100", "260.00"); unstale(); },
-    dupe: function () { set("MSFT", "buy", "market", "500", ""); unstale(); },
-    stale: function () { set("NVDA", "buy", "market", "100", ""); $("staleToggle").checked = true; $("staleToggle").dispatchEvent(new Event("change")); },
-    bp: function () { set("NVDA", "buy", "market", "5000", ""); unstale(); }
+    clean:         function () { set("ACME-0042", "AAPL", "buy", "market", "100", ""); unstale(); unstaleAcct(); },
+    collar:        function () { set("ACME-0042", "AAPL", "buy", "limit", "100", "260.00"); unstale(); unstaleAcct(); },
+    dupe:          function () { set("ACME-0042", "MSFT", "buy", "market", "500", ""); unstale(); unstaleAcct(); },
+    stale:         function () { set("ACME-0042", "NVDA", "buy", "market", "100", ""); unstaleAcct(); stale(); },
+    bp:            function () { set("ACME-0042", "NVDA", "buy", "market", "5000", ""); unstale(); unstaleAcct(); },
+    restricted:    function () { set("ACME-0300", "AAPL", "buy", "market", "100", ""); unstale(); unstaleAcct(); },
+    closingadd:    function () { set("ACME-0200", "AAPL", "buy", "market", "100", ""); unstale(); unstaleAcct(); },
+    closingreduce: function () { set("ACME-0200", "AAPL", "sell", "market", "100", ""); unstale(); unstaleAcct(); },
+    staleacct:     function () { set("ACME-0042", "AAPL", "buy", "market", "100", ""); unstale(); staleAcct(); }
   };
-  function set(sym, side, type, qty, limit) {
-    $("symbol").value = sym; $("side").value = side; $("otype").value = type; $("qty").value = qty; $("limit").value = limit;
+  function set(acct, sym, side, type, qty, limit) {
+    $("account").value = acct; $("symbol").value = sym; $("side").value = side;
+    $("otype").value = type; $("qty").value = qty; $("limit").value = limit;
+    loadAccounts();
   }
   function unstale() { if ($("staleToggle").checked) { $("staleToggle").checked = false; $("staleToggle").dispatchEvent(new Event("change")); } }
+  function stale() { $("staleToggle").checked = true; $("staleToggle").dispatchEvent(new Event("change")); }
+  function unstaleAcct() { if ($("acctStaleToggle").checked) { $("acctStaleToggle").checked = false; $("acctStaleToggle").dispatchEvent(new Event("change")); } }
+  function staleAcct() { $("acctStaleToggle").checked = true; $("acctStaleToggle").dispatchEvent(new Event("change")); }
   $("scenarios").addEventListener("click", function (e) {
     var btn = e.target.closest("[data-sc]"); if (!btn) return; SC[btn.getAttribute("data-sc")]();
   });

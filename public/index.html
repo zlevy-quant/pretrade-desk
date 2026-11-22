@@ -58,9 +58,13 @@
             <button class="chipbtn" data-sc="dupe">Duplicate x3</button>
             <button class="chipbtn" data-sc="stale">Stale market data</button>
             <button class="chipbtn" data-sc="bp">Over buying power</button>
+            <button class="chipbtn" data-sc="restricted">Restricted account</button>
+            <button class="chipbtn" data-sc="closingadd">Closing-only: add</button>
+            <button class="chipbtn" data-sc="closingreduce">Closing-only: reduce</button>
+            <button class="chipbtn" data-sc="staleacct">Stale account view</button>
           </div>
           <div class="row2">
-            <div class="field"><label for="account">Account</label><input id="account" value="ACME-0042"></div>
+            <div class="field"><label for="account">Account</label><select id="account"></select></div>
             <div class="field"><label for="symbol">Symbol</label><select id="symbol"></select></div>
           </div>
           <div class="row3">
@@ -83,6 +87,15 @@
         <div class="body">
           <div id="quotes"></div>
           <label style="margin-top:.8rem"><input type="checkbox" id="staleToggle" style="width:auto;margin-right:.4rem">Force the selected symbol's feed stale (server-side, fail-closed)</label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Accounts <span style="text-transform:none;font-weight:400;color:var(--muted)">(real-time position view, from the database)</span></h3>
+        <div class="body">
+          <div id="accounts"></div>
+          <p class="note">Each account carries a restriction status and an as-of time, the way a real-time position read does. The engine fails closed on a missing, stale, or unknown account view. Force the selected account's view stale to see the account-restriction control escalate to a hard block.</p>
+          <label style="margin-top:.4rem"><input type="checkbox" id="acctStaleToggle" style="width:auto;margin-right:.4rem">Force the selected account's view stale (server-side, fail-closed)</label>
         </div>
       </div>
     </div>
