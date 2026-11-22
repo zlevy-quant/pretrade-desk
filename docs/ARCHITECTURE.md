@@ -16,12 +16,13 @@ the rules from being duplicated across services and languages.
    |   (engine.py)           |  ----------------->  Store (accounts, prior orders, kill switch, config)
    |                         |
    |   runs control chain:   |
-   |   field_validation  H   |
-   |   kill_switch       H   |
-   |   price_collar      S   |
-   |   duplicate_guard   H   |
-   |   buying_power      A   |
-   |   credit_limit      A   |
+   |   field_validation   H  |
+   |   kill_switch        H  |
+   |   account_restriction H |
+   |   price_collar      S/H |
+   |   duplicate_guard    H  |
+   |   buying_power       A  |
+   |   credit_limit       A  |
    +-------------------------+
                 |
                 v
@@ -34,7 +35,37 @@ the rules from being duplicated across services and languages.
      (store.py)      (audit.py)
 ```
 
-H = hard, S = soft, A = audit.
+H = hard, S = soft, A = audit. `price_collar` is shown S/H because its severity
+is decided per result: a price outside the band is soft (a supervisor may
+release it), while a missing or stale quote escalates to hard, a data-integrity
+failure that must not be waveable.
+
+The same flow, as the scenario walkthrough narrates it:
+
+```mermaid
+flowchart TD
+    O[Order] --> E[PreTradeEngine.evaluate]
+    E --> FV[field_validation H]
+    E --> KS[kill_switch H]
+    E --> AR[account_restriction H]
+    E --> PC[price_collar S/H]
+    E --> DG[duplicate_rate_guard H]
+    E --> BP[buying_power A]
+    E --> CL[credit_limit A]
+    FV --> C{compose}
+    KS --> C
+    AR --> C
+    PC --> C
+    DG --> C
+    BP --> C
+    CL --> C
+    C -->|any hard block| HB[BLOCK: not overridable]
+    C -->|else any soft block| SB[BLOCK: supervisor may release]
+    C -->|else| AL[ALLOW]
+    HB --> P[persist order + append-only audit]
+    SB --> P
+    AL --> P
+```
 
 ## Composition rule
 
@@ -46,6 +77,12 @@ The engine composes the per-control results into one verdict:
 
 Audit-only controls are always recorded and never change the decision on their
 own.
+
+Composition is on the **per-result** kind, not the control's nominal
+classification. This lets one control vary its severity by outcome: the price
+collar is nominally soft, but it returns a hard result when the quote is missing
+or stale, so a supervisor can release a price judgment but cannot wave an order
+through while the market-data feed is down.
 
 ## Layers and why they are separated
 
@@ -75,8 +112,17 @@ own.
 
 ## Testing and performance
 
-- `tests/` exercises the controls and the composition rule, including stale,
-  missing, and future-dated quotes, the duplicate window boundary, and the
-  precedence of hard over soft.
+- `tests/test_engine.py` exercises the controls and the composition rule,
+  including stale, missing, and future-dated quotes, the stale and unknown
+  account read, the closing-only and restricted account cases, the duplicate
+  window boundary, the soft-to-hard escalation, and the precedence of hard over
+  soft.
+- `tests/test_scenarios.py` asserts each narrated scenario produces the outcome
+  it advertises, so the live demo and the suite cannot drift apart.
+- `tests/test_service.py` drives the real HTTP handler on an ephemeral port:
+  authentication, the order flow, and the supervisor override (including that an
+  advisor cannot override and that a hard block is not overridable).
 - `bench/latency.py` measures the per-order evaluation latency of the full chain
   against an in-memory store, isolating the engine from I/O.
+- `mypy --strict` passes across the package, and CI runs the type check, the
+  tests, and the scenario and benchmark smoke runs on Python 3.10, 3.11, 3.12.

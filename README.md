@@ -23,8 +23,13 @@ secrets; market data, accounts, and verdicts are simulated.
   **audit** (recorded, non-gating):
   - `field_validation` (hard)
   - `kill_switch` (hard, per tenant)
-  - `price_collar` (soft) with a market-data freshness contract that fails
-    closed on a missing or stale quote, keying freshness to the stalest side
+  - `account_restriction` (hard, per tenant): reads the account's restriction
+    status (none, closing-only, restricted) with an as-of freshness bound, and
+    fails closed on a missing, stale, or unknown account read
+  - `price_collar` (soft when a price is merely outside the band and a
+    supervisor may release it; **escalates to hard** on a missing or stale
+    quote, because a data-integrity failure is not a pricing judgment and must
+    not be waveable)
   - `duplicate_rate_guard` (hard): duplicate-intent / runaway-algorithm
     detection on account, side, symbol, and quantity within a time window
   - `buying_power` and `credit_limit` (audit-only)
@@ -36,7 +41,7 @@ secrets; market data, accounts, and verdicts are simulated.
 
 ## Run it
 
-Requires Python 3.9+ only. There are no third-party dependencies.
+Requires Python 3.10+ only. There are no third-party dependencies.
 
 ```
 python -m pretrade
@@ -51,15 +56,33 @@ With Docker:
 docker build -t pretrade . && docker run -p 8080:8080 pretrade
 ```
 
+## See it decide (scenario walkthrough)
+
+A narrated run of each behavior, against the same engine the service uses:
+
+```
+python -m pretrade.scenarios
+```
+
+It walks a clean allow, a soft collar block released by a supervisor, a
+stale-feed fail-closed, the tenant kill switch, duplicate-intent detection, and
+the restricted and closing-only account cases, printing the verdict and the
+control that drove each one.
+
 ## Test it
 
 ```
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v   # 32 tests
+python -m mypy pretrade bench             # strict, no issues
 ```
 
-The suite covers every control, the fail-closed paths (stale quote, missing
-quote, future-dated quote), the duplicate window, the hard-over-soft composition
-rule, and the audit-only behaviour of buying power.
+The suite covers every control, the fail-closed paths (stale, missing, and
+future-dated quotes, and a stale or unknown account read), the duplicate window,
+the hard-over-soft composition rule, the soft-to-hard escalation on a data
+failure, the audit-only buying-power behavior, the scenario outcomes, and the
+HTTP surface end to end (login, order, supervisor override). Continuous
+integration runs the type check, the tests, and the smoke runs on Python 3.10,
+3.11, and 3.12 (`.github/workflows/ci.yml`).
 
 ## Benchmark it
 
@@ -69,10 +92,10 @@ The engine runs in line on the order path, so its latency matters.
 python -m bench.latency 20000
 ```
 
-Representative result on a developer laptop (full control chain, in-memory
-store): roughly 30,000+ orders/sec with p50 around 26 microseconds and p99 under
-100 microseconds. Numbers vary by machine; the point is that the control chain
-is well inside a sub-millisecond budget.
+Representative result on a developer laptop (full seven-control chain, in-memory
+store): around 26,000 orders/sec with p50 near 33 microseconds and p99 under 100
+microseconds. Numbers vary by machine; the point is that the whole control chain
+sits comfortably inside a sub-millisecond budget.
 
 ## Layout
 
@@ -86,10 +109,13 @@ pretrade/
   engine.py       orchestrates the controls and composes the verdict
   audit.py        append-only approval/decision trail
   service.py      thin JSON/HTTP surface over the engine
-tests/            unittest suite
+  scenarios.py    narrated walkthrough runner (python -m pretrade.scenarios)
+tests/            unittest suite: engine, scenarios, and the HTTP service
 bench/            latency benchmark
-docs/             architecture and design-decision notes
+docs/             architecture, design decisions, and the project story
 public/           optional browser client (static HTML/CSS/JS)
+.github/          CI: mypy strict, tests, and smoke runs on 3.10 / 3.11 / 3.12
 ```
 
-See `docs/ARCHITECTURE.md` and `docs/DESIGN_DECISIONS.md` for the design.
+See `docs/ARCHITECTURE.md`, `docs/DESIGN_DECISIONS.md`, and `docs/STORY.md` for
+the design and the background.

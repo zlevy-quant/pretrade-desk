@@ -30,6 +30,9 @@ class EngineTest(unittest.TestCase):
         self.engine = PreTradeEngine(default_controls())
         self.now = utcnow()
 
+    def tearDown(self) -> None:
+        self.store.close()
+
     def ctx(self) -> EvaluationContext:
         return EvaluationContext(store=self.store, config=self.store.get_config(),
                                  market_data=self.store, now=self.now, actor="tester")
@@ -81,21 +84,28 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.result(v, "price_collar").status, ControlStatus.PASS)
         self.assertEqual(v.decision, Decision.ALLOW)
 
-    def test_stale_quote_fails_closed(self):
+    def test_stale_quote_fails_closed_hard(self):
+        # A data-integrity failure escalates to a hard, non-overridable block,
+        # unlike a price merely outside the band (which is soft/overridable).
         self.store.set_quote_as_of("AAPL", self.now - timedelta(hours=16))
         v = self.engine.evaluate(order(), self.ctx())
         pc = self.result(v, "price_collar")
         self.assertEqual(pc.status, ControlStatus.BLOCK)
+        self.assertEqual(pc.kind, ControlKind.HARD)
         self.assertIn("data_stale", pc.reason)
+        self.assertEqual(v.decision, Decision.BLOCK)
+        self.assertFalse(v.overridable)
 
-    def test_missing_quote_fails_closed(self):
+    def test_missing_quote_fails_closed_hard(self):
         v = self.engine.evaluate(order(symbol="UNKNOWN"), self.ctx())
         self.assertEqual(self.result(v, "price_collar").status, ControlStatus.BLOCK)
+        self.assertFalse(v.overridable)
 
     def test_future_dated_quote_is_not_trusted(self):
         self.store.set_quote_as_of("AAPL", self.now + timedelta(hours=1))
-        self.assertEqual(self.result(self.engine.evaluate(order(), self.ctx()), "price_collar").status,
-                         ControlStatus.BLOCK)
+        v = self.engine.evaluate(order(), self.ctx())
+        self.assertEqual(self.result(v, "price_collar").status, ControlStatus.BLOCK)
+        self.assertFalse(v.overridable)
 
     # ---- duplicate / rate guard (hard) ----
     def test_duplicate_guard_passes_below_threshold(self):
@@ -141,8 +151,36 @@ class EngineTest(unittest.TestCase):
 
     def test_every_control_runs_and_is_reported(self):
         names = {c.name for c in self.engine.evaluate(order(), self.ctx()).controls}
-        self.assertEqual(names, {"field_validation", "kill_switch", "price_collar",
-                                 "duplicate_rate_guard", "buying_power", "credit_limit"})
+        self.assertEqual(names, {"field_validation", "kill_switch", "account_restriction",
+                                 "price_collar", "duplicate_rate_guard", "buying_power", "credit_limit"})
+
+    # ---- account restriction (hard, fail-closed) ----
+    def test_closing_only_blocks_a_buy_hard(self):
+        v = self.engine.evaluate(order(account_id="ACME-0200", side=Side.BUY), self.ctx())
+        self.assertEqual(self.result(v, "account_restriction").status, ControlStatus.BLOCK)
+        self.assertEqual(v.decision, Decision.BLOCK)
+        self.assertFalse(v.overridable)
+
+    def test_closing_only_allows_a_sell(self):
+        v = self.engine.evaluate(order(account_id="ACME-0200", side=Side.SELL), self.ctx())
+        self.assertEqual(self.result(v, "account_restriction").status, ControlStatus.PASS)
+
+    def test_restricted_account_blocks_all_trading_hard(self):
+        v = self.engine.evaluate(order(account_id="ACME-0300", side=Side.SELL), self.ctx())
+        self.assertEqual(self.result(v, "account_restriction").status, ControlStatus.BLOCK)
+        self.assertEqual(v.decision, Decision.BLOCK)
+        self.assertFalse(v.overridable)
+
+    def test_stale_account_read_fails_closed(self):
+        self.store.set_account_as_of("ACME-0042", self.now - timedelta(hours=16))
+        ar = self.result(self.engine.evaluate(order(), self.ctx()), "account_restriction")
+        self.assertEqual(ar.status, ControlStatus.BLOCK)
+        self.assertIn("data_stale", ar.reason)
+
+    def test_unknown_restriction_fails_closed(self):
+        self.store.set_restriction("ACME-0042", "unknown")
+        self.assertEqual(self.result(self.engine.evaluate(order(), self.ctx()), "account_restriction").status,
+                         ControlStatus.BLOCK)
 
 
 if __name__ == "__main__":

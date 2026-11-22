@@ -38,14 +38,15 @@ def verdict_to_json(order_id: str, status: str, verdict: Verdict) -> dict[str, A
     }
 
 
-def parse_order(body: dict, tenant: str) -> tuple[Optional[Order], Optional[str]]:
+def parse_order(body: dict[str, Any], tenant: str) -> tuple[Optional[Order], Optional[str]]:
     try:
         side = Side(str(body.get("side", "")).strip())
         otype = OrderType(str(body.get("order_type", "")).strip())
     except ValueError:
         return None, "unknown side or order type"
+    raw_qty: Any = body.get("quantity")
     try:
-        qty = int(body.get("quantity"))
+        qty = int(raw_qty)
     except (TypeError, ValueError):
         return None, "quantity must be a whole number"
     lp = body.get("limit_price")
@@ -71,7 +72,7 @@ class App:
 class Handler(BaseHTTPRequestHandler):
     app: App  # injected via server
 
-    def log_message(self, *args) -> None:  # quiet by default
+    def log_message(self, *args: Any) -> None:  # quiet by default
         pass
 
     # ---- helpers ----
@@ -83,16 +84,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _body(self) -> dict:
+    def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
             return {}
         try:
-            return json.loads(self.rfile.read(length) or b"{}")
+            data: Any = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
             return {"__parse_error": True}
+        return data if isinstance(data, dict) else {}
 
-    def _session(self) -> Optional[dict]:
+    def _session(self) -> Optional[dict[str, Any]]:
         auth = self.headers.get("Authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else None
         return self.app.store.get_session(token)

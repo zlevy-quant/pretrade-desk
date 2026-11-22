@@ -16,13 +16,33 @@ and blocks.
 ## 2. Controls are classified hard, soft, or audit
 
 Not every control should stop an order the same way. A hard control (field
-validation, kill switch, duplicate guard) is final. A soft control (price
-collar) is gating but can be released by an authorized supervisor, because a
-price just outside the band is a judgement a licensed person can make. An
-audit-only control (buying power, credit limit) is recorded for the trail but
-never blocks on its own, which lets exposure be observed before it is made
-gating. The engine encodes this as the composition rule, and the classification
-is explicit in each control's `kind`.
+validation, kill switch, account restriction, duplicate guard) is final. A soft
+control (price collar) is gating but can be released by an authorized
+supervisor, because a price just outside the band is a judgment a licensed
+person can make. An audit-only control (buying power, credit limit) is recorded
+for the trail but never blocks on its own, which lets exposure be observed
+before it is made gating. The engine encodes this as the composition rule.
+
+## 2a. Severity is per result, not per control
+
+The classification lives on each `ControlResult`, so one control can vary its
+severity by outcome, and the engine composes on the result's `kind`. The price
+collar uses this: a price outside the band is a soft result a supervisor may
+release, but a missing or stale quote is a hard result. A data-integrity failure
+is not a pricing judgment, so it must not be waveable; the desk cannot push an
+order through while the market-data feed is down. Keeping severity on the result
+rather than the class is what lets a single control express both.
+
+## 2b. The account restriction control reads a fresh account view and fails closed
+
+The account read carries a restriction status (none, closing-only, restricted)
+and an as-of time, the way a real pre-trade gate consumes a real-time account
+view. The control treats anything it cannot trust as a block: an account it
+cannot find, a read with no as-of, a read older than the freshness bound, or an
+unknown restriction code all fail closed rather than reading as unrestricted.
+A restriction is a hard, non-overridable block. Opening versus closing is taken
+from the side (buy and sell-short add exposure; sell and buy-to-cover reduce it),
+so a closing-only account may close a position but not add to one.
 
 ## 3. Duplicate-intent detection, not a blanket volume cap
 

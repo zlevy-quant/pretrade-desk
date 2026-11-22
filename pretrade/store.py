@@ -16,7 +16,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
 from .config import ControlConfig
 from .domain import Order, OrderType, Side
@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS quotes (
 
 CREATE TABLE IF NOT EXISTS accounts (
   account_id TEXT PRIMARY KEY, tenant TEXT NOT NULL DEFAULT 'RIA',
-  cash REAL NOT NULL, credit_limit REAL NOT NULL);
+  cash REAL NOT NULL, credit_limit REAL NOT NULL,
+  restriction TEXT NOT NULL DEFAULT 'none',   -- none | closing_only | restricted | unknown
+  as_of TEXT);                                -- RTP read as-of; NULL reads as unavailable
 
 CREATE TABLE IF NOT EXISTS kill_switch (
   tenant TEXT PRIMARY KEY, engaged INTEGER NOT NULL DEFAULT 0,
@@ -57,8 +59,17 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE TABLE IF NOT EXISTS controls_config (
   id INTEGER PRIMARY KEY CHECK (id = 1), collar_bps INTEGER NOT NULL,
   quote_max_age_sec INTEGER NOT NULL, dup_window_sec INTEGER NOT NULL,
-  dup_threshold INTEGER NOT NULL);
+  dup_threshold INTEGER NOT NULL,
+  account_max_age_sec INTEGER NOT NULL DEFAULT 60);
 """
+
+# Defensive, additive migrations for an existing database created by an earlier
+# schema. Each is idempotent: a duplicate-column error is swallowed.
+_ADDITIVE_MIGRATIONS = (
+    "ALTER TABLE accounts ADD COLUMN restriction TEXT NOT NULL DEFAULT 'none'",
+    "ALTER TABLE accounts ADD COLUMN as_of TEXT",
+    "ALTER TABLE controls_config ADD COLUMN account_max_age_sec INTEGER NOT NULL DEFAULT 60",
+)
 
 
 def _iso(dt: datetime) -> str:
@@ -80,8 +91,16 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._migrate()
 
+    def close(self) -> None:
+        self.conn.close()
+
     def _migrate(self) -> None:
         self.conn.executescript(SCHEMA)
+        for stmt in _ADDITIVE_MIGRATIONS:
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already present
         self.conn.commit()
 
     # ---- seed ----
@@ -90,8 +109,8 @@ class Store:
         now = _iso(datetime.now(timezone.utc))
         if cur.execute("SELECT COUNT(*) AS n FROM controls_config").fetchone()["n"] == 0:
             cur.execute(
-                "INSERT INTO controls_config (id, collar_bps, quote_max_age_sec, dup_window_sec, dup_threshold)"
-                " VALUES (1, 300, 60, 60, 3)"
+                "INSERT INTO controls_config (id, collar_bps, quote_max_age_sec, dup_window_sec,"
+                " dup_threshold, account_max_age_sec) VALUES (1, 300, 60, 60, 3, 60)"
             )
         if cur.execute("SELECT COUNT(*) AS n FROM instruments").fetchone()["n"] == 0:
             rows = [
@@ -104,8 +123,17 @@ class Store:
                 cur.execute("INSERT INTO instruments (symbol, name, cusip) VALUES (?,?,?)", (sym, name, cusip))
                 cur.execute("INSERT INTO quotes (symbol, bid, ask, as_of) VALUES (?,?,?,?)", (sym, bid, ask, now))
         if cur.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()["n"] == 0:
-            cur.execute("INSERT INTO accounts VALUES ('ACME-0042','RIA',250000,500000)")
-            cur.execute("INSERT INTO accounts VALUES ('ACME-0100','BD',1000000,2000000)")
+            accts = [
+                # account_id, tenant, cash, credit_limit, restriction, as_of
+                ("ACME-0042", "RIA", 250000, 500000, "none", now),
+                ("ACME-0100", "BD", 1000000, 2000000, "none", now),
+                ("ACME-0200", "RIA", 75000, 150000, "closing_only", now),
+                ("ACME-0300", "RIA", 500000, 1000000, "restricted", now),
+            ]
+            cur.executemany(
+                "INSERT INTO accounts (account_id, tenant, cash, credit_limit, restriction, as_of)"
+                " VALUES (?,?,?,?,?,?)", accts
+            )
         for tenant in ("RIA", "BD"):
             if cur.execute("SELECT COUNT(*) AS n FROM kill_switch WHERE tenant=?", (tenant,)).fetchone()["n"] == 0:
                 cur.execute("INSERT INTO kill_switch (tenant, engaged, updated_at, updated_by) VALUES (?,0,?, 'seed')", (tenant, now))
@@ -114,7 +142,8 @@ class Store:
     # ---- config ----
     def get_config(self) -> ControlConfig:
         r = self.conn.execute("SELECT * FROM controls_config WHERE id=1").fetchone()
-        return ControlConfig(r["collar_bps"], r["quote_max_age_sec"], r["dup_window_sec"], r["dup_threshold"])
+        return ControlConfig(r["collar_bps"], r["quote_max_age_sec"], r["dup_window_sec"],
+                             r["dup_threshold"], r["account_max_age_sec"])
 
     # ---- market data ----
     def get_quote(self, symbol: str) -> Optional[Quote]:
@@ -123,7 +152,7 @@ class Store:
             return None
         return Quote(r["symbol"], Decimal(str(r["bid"])), Decimal(str(r["ask"])), _parse(r["as_of"]))
 
-    def list_quotes(self) -> list[dict]:
+    def list_quotes(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT q.symbol, i.name, i.cusip, q.bid, q.ask, q.as_of FROM quotes q "
             "JOIN instruments i ON i.symbol=q.symbol ORDER BY q.symbol"
@@ -136,9 +165,25 @@ class Store:
         return cur.rowcount
 
     # ---- accounts ----
-    def get_account(self, account_id: str) -> Optional[dict]:
+    def get_account(self, account_id: str) -> Optional[dict[str, Any]]:
         r = self.conn.execute("SELECT * FROM accounts WHERE account_id=?", (account_id,)).fetchone()
         return dict(r) if r else None
+
+    def list_accounts(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT account_id, tenant, cash, credit_limit, restriction, as_of FROM accounts ORDER BY account_id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_account_as_of(self, account_id: str, as_of: datetime) -> int:
+        cur = self.conn.execute("UPDATE accounts SET as_of=? WHERE account_id=?", (_iso(as_of), account_id))
+        self.conn.commit()
+        return cur.rowcount
+
+    def set_restriction(self, account_id: str, restriction: str) -> int:
+        cur = self.conn.execute("UPDATE accounts SET restriction=? WHERE account_id=?", (restriction, account_id))
+        self.conn.commit()
+        return cur.rowcount
 
     # ---- kill switch ----
     def kill_engaged(self, tenant: str) -> bool:
@@ -176,7 +221,7 @@ class Store:
         self.conn.commit()
         return oid
 
-    def get_order(self, order_id: str) -> Optional[dict]:
+    def get_order(self, order_id: str) -> Optional[dict[str, Any]]:
         r = self.conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         return dict(r) if r else None
 
@@ -184,7 +229,7 @@ class Store:
         self.conn.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
         self.conn.commit()
 
-    def list_orders(self, limit: int = 100) -> list[dict]:
+    def list_orders(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT id, created_at, username, account_id, symbol, side, quantity, status "
             "FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -199,7 +244,7 @@ class Store:
         )
         self.conn.commit()
 
-    def list_audit(self, limit: int = 200) -> list[dict]:
+    def list_audit(self, limit: int = 200) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT ts, actor, event, order_id, detail FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
@@ -215,7 +260,7 @@ class Store:
         self.conn.commit()
         return token
 
-    def get_session(self, token: Optional[str]) -> Optional[dict]:
+    def get_session(self, token: Optional[str]) -> Optional[dict[str, Any]]:
         if not token:
             return None
         r = self.conn.execute("SELECT * FROM sessions WHERE token=?", (token,)).fetchone()

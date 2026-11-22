@@ -12,7 +12,7 @@ let an order through.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional, Protocol, runtime_checkable
 
@@ -42,6 +42,13 @@ class Control(Protocol):
 
 def _money(n: Decimal) -> str:
     return "${:,.0f}".format(n)
+
+
+def _parse_as_of(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    dt = datetime.fromisoformat(ts)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 class FieldValidation:
@@ -75,12 +82,62 @@ class KillSwitch:
         return ControlResult(self.name, self.kind, ControlStatus.PASS, "not engaged")
 
 
+class AccountRestriction:
+    """Enforces the account's custodian restriction status, failing closed.
+
+    The account read carries a restriction status (none, closing_only, restricted)
+    and an as-of time. This control treats the read the way a real pre-trade gate
+    treats an RTP account view: an account that cannot be read, carries no as-of,
+    is stale, or has an unknown restriction is blocked rather than assumed open.
+    A regulatory restriction is a hard, non-overridable block.
+
+    Opening versus closing is read from the side: BUY and SELL_SHORT add exposure;
+    SELL and BUY_TO_COVER reduce it. A closing-only account may close but not add.
+    """
+
+    name = "account_restriction"
+    kind = ControlKind.HARD
+
+    _OPENING = (Side.BUY, Side.SELL_SHORT)
+
+    def evaluate(self, order: Order, ctx: EvaluationContext) -> ControlResult:
+        account = ctx.store.get_account(order.account_id)
+        if account is None:
+            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+                                 "data_stale: account not found, cannot confirm restriction status, failing closed")
+        as_of = _parse_as_of(account.get("as_of"))
+        if as_of is None:
+            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+                                 "data_stale: account read has no as-of, failing closed")
+        age = (ctx.now - as_of).total_seconds()
+        if not 0 <= age <= ctx.config.account_max_age_sec:
+            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+                                 f"data_stale: account read {int(age)}s old exceeds "
+                                 f"{ctx.config.account_max_age_sec}s bound, failing closed")
+        restriction = (account.get("restriction") or "unknown").lower()
+        if restriction == "unknown":
+            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+                                 "unknown restriction code, failing closed until mapped")
+        if restriction == "restricted":
+            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+                                 "account is restricted: all trading halted")
+        if restriction == "closing_only" and order.side in self._OPENING:
+            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+                                 f"account is closing-only: a {order.side.value} adds exposure and is not allowed")
+        return ControlResult(self.name, self.kind, ControlStatus.PASS,
+                             f"restriction '{restriction}' permits this {order.side.value}")
+
+
 class PriceCollar:
     """Blocks an order priced too far from the market.
 
-    Soft (a supervisor may override) when the price is simply outside the band.
-    Fails closed on a missing or stale quote, which is a data-integrity failure,
-    not a pricing judgement.
+    Two outcomes with deliberately different severities. A price simply outside
+    the band is a soft block: a licensed supervisor may release it, because the
+    price is a judgment. A missing or stale quote is a data-integrity failure,
+    not a pricing judgment, so it escalates to a hard, non-overridable block: the
+    desk cannot wave an order through while the market-data feed is down. This is
+    the per-result kind the engine composes on, independent of the control's
+    nominal classification.
     """
 
     name = "price_collar"
@@ -89,11 +146,11 @@ class PriceCollar:
     def evaluate(self, order: Order, ctx: EvaluationContext) -> ControlResult:
         quote = ctx.market_data.get_quote(order.symbol)
         if quote is None:
-            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+            return ControlResult(self.name, ControlKind.HARD, ControlStatus.BLOCK,
                                  "data_stale: no quote available, failing closed")
         if not quote.is_fresh(ctx.now, ctx.config.quote_max_age_sec):
             age = int(quote.age_seconds(ctx.now))
-            return ControlResult(self.name, self.kind, ControlStatus.BLOCK,
+            return ControlResult(self.name, ControlKind.HARD, ControlStatus.BLOCK,
                                  f"data_stale: quote {age}s old exceeds {ctx.config.quote_max_age_sec}s bound, failing closed")
         mid = quote.mid
         band = ctx.config.collar_fraction
@@ -166,4 +223,5 @@ class CreditLimit:
 
 def default_controls() -> list[Control]:
     """The day-one control chain, in evaluation order."""
-    return [FieldValidation(), KillSwitch(), PriceCollar(), DuplicateRateGuard(), BuyingPower(), CreditLimit()]
+    return [FieldValidation(), KillSwitch(), AccountRestriction(), PriceCollar(),
+            DuplicateRateGuard(), BuyingPower(), CreditLimit()]

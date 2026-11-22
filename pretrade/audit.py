@@ -8,7 +8,7 @@ write-once (WORM) posture.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from .domain import Order, Verdict
 from .store import Store
@@ -33,5 +33,5 @@ class AuditTrail:
     def record_event(self, actor: str, event: str, detail: str, order_id: Optional[str] = None) -> None:
         self._store.append_audit(actor, event, detail, order_id)
 
-    def tail(self, limit: int = 200) -> list[dict]:
+    def tail(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._store.list_audit(limit)

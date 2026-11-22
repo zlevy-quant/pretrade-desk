@@ -20,6 +20,9 @@ class ControlConfig:
     # Window and count for duplicate-intent detection.
     dup_window_sec: int = 60
     dup_threshold: int = 3
+    # Maximum age, in seconds, of the account (RTP) read before the
+    # restriction and exposure controls fail closed on a stale account view.
+    account_max_age_sec: int = 60
 
     @property
     def collar_fraction(self) -> Decimal:
